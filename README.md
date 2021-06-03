@@ -10,9 +10,11 @@ I then use Home Assistant MQTT sensors to read the states, display on my dashboa
 
 ## Node-RED flow
 
-![Loadshedding NodeRed flow](/images/nodered.png)
+![Loadshedding Node-RED flow](/images/nodered.png)
 
-**Download [NodeRED flow](nodered.json)**
+**Download [Node-RED flow](nodered.json)**
+
+To import, in your Node-RED click the hamburger menu at top right, Import, and paste or select from file.
 
 ### City of Cape Town schedule
 My office gets its electricity from the City of Cape Town. The _Calculate Office schedule_ function makes use of [Quantiversal/Cape-Town-Loadshedding-Schedule](https://github.com/Quantiversal/Cape-Town-Loadshedding-Schedule) javascript library which I added to the functions `On Start` method.
@@ -21,11 +23,11 @@ My office gets its electricity from the City of Cape Town. The _Calculate Office
 
 ### Eskom schedule
 
-Eskom does not make a similar calculator (other than in an Excel sheet), so I chose to scrape the Eskom website for my areas schedule. This can definitely be improved. (PRs welcome.)
+Eskom does not make a similar calculator (other than in an Excel sheet), so I chose to scrape the Eskom website for my areas' schedule. This can definitely be improved. (PRs welcome.)
 
-The easiest way to get the URL used in `Get Home schedule from Eskom API` is to go to the [Eskom loadshedding](https://loadshedding.eskom.co.za/) website, open Chrome dev tools, go to the Network tab and then search for your suburb in the Quicksearch for Direct Eskom Customers box. Select the suburb, and the page that is loaded is the URL you want.
+The easiest way to get the URL used in _Get Home schedule from Eskom API_ is to go to the [Eskom loadshedding](https://loadshedding.eskom.co.za/) website, open Chrome dev tools, go to the Network tab and then search for your suburb in the Quicksearch for Direct Eskom Customers box. Select the suburb, and the page that is loaded is the URL you want.
 
-Paste that URL, something like `https://loadshedding.eskom.co.za/LoadShedding/GetScheduleM/64660/2/Western%20Cape/822?_=1622753016064` into the URL box of the `Get Home schedule from Eskom API` node. Where you see `/2/` in the URL, replace it with `/{{stage}}/` to substitute the current loadshedding stage and pull the correct calendar.
+Paste that URL, something like `https://loadshedding.eskom.co.za/LoadShedding/GetScheduleM/64660/2/Western%20Cape/822?_=1622753016064` into the URL box of the _Get Home schedule from Eskom API_ node. Where you see `/2/` in the URL, replace it with `/{{stage}}/` to substitute the current loadshedding stage and pull the correct calendar.
 
 
 ## MQTT messages
@@ -36,11 +38,23 @@ Node-RED publishes messages with the following format:
 
 Topic `loadshedding/stage`
 
+The current loadshedding stage.
+
 ```
 2
 ```
 
+Topic `loadshedding/stage/updated`
+
+Only publishes when the stage changes
+
+```
+3
+```
+
 Topic `loadshedding/home/next`
+
+The current `time`, the loadshedding `schedule` for today and tomorrow and the `next` scheduled slot for the `home` area.
 
 ```json
 {
@@ -57,15 +71,17 @@ Topic `loadshedding/home/next`
 
 Topic `loadshedding/office/next`
 
+The current `time`, the loadshedding `schedule` for today and tomorrow and the `next` scheduled slot for the `office` area. (Note for my office I haven't implemented the `schedule` yet since.... covid means work from home. PR's welcome.)
+
 ```json
 {
   "time": "2021-06-03T22:24:20.305+02:00",
-  "schedule": [
-    
-  ],
+  "schedule": [],
   "next": "2021-06-04T04:00:00.000+02:00"
 }
 ```
+
+Personally, I only every use `next`, but you could display today's and tomorrow's schedule. The timezone (+02:00) is so that Home Assistant correctly interprets the time.
 
 
 ## Home Assistant
@@ -99,7 +115,7 @@ Once you've added this to your configuration file, restart Home Assistant and th
 ### Lovelace dashboard entity card
 ![Loadshedding entity card](/images/entity-card.png)
 
-To add an entity card to your dashboard, click three dots at top right, Edit Dashboard, click Add Card button at botom of page, select Entities, Show Code Editor and past the following:
+To add an entity card to your dashboard, click three dots at top right, Edit Dashboard, click Add Card button at botom of page, select Entities, Show Code Editor and paste the following:
 
 ```yaml
 type: entities
@@ -122,7 +138,7 @@ I only show the next scheduled loadshedding time if there is currently loadshedd
 ### Lovelace dashboard badge
 ![Stage 2 badge](/images/badge.png)
 
-For the **badge** I use the following yaml in my Lovelace dashboard:
+For the badge I use the following yaml in my Lovelace dashboard:
 
 ```yaml
 title: Home
@@ -141,11 +157,13 @@ views:
 
 To add it, in your dashboard click three dots at top right, Edit Dashboard, click three dots again, select Raw configuration editor. Paste the yaml from `- type: entity-filter` onwards under the `badges` section. Then Save.
 
+The badge only appears if there is loadshedding.
+
 
 ### Automations
 I have a 15 minute reminder to boil the kettle pushed to my phone and watch, and if my TV is on play a voice message.
 
-In your [automations.yaml](https://github.com/dalehumby/homeassistant-config/blob/master/automations.yaml#L51) file of Home Assistant, paste the following:
+In [automations.yaml](https://github.com/dalehumby/homeassistant-config/blob/master/automations.yaml#L51) file of Home Assistant, paste the following:
 
 ```yaml
 - id: loadshedding_update_home_schedule
