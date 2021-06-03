@@ -1,0 +1,674 @@
+[
+    {
+        "id": "b2e43c1e.1d392",
+        "type": "tab",
+        "label": "Load shedding",
+        "disabled": false,
+        "info": ""
+    },
+    {
+        "id": "887184d5.024b58",
+        "type": "inject",
+        "z": "b2e43c1e.1d392",
+        "name": "5 min",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "topic",
+                "vt": "str"
+            }
+        ],
+        "repeat": "300",
+        "crontab": "",
+        "once": true,
+        "onceDelay": "0.1",
+        "topic": "",
+        "payload": "",
+        "payloadType": "num",
+        "x": 90,
+        "y": 100,
+        "wires": [
+            [
+                "4cda00a7.9af18",
+                "6cbad381.3b61ac"
+            ]
+        ]
+    },
+    {
+        "id": "2008f989.8e1066",
+        "type": "mqtt out",
+        "z": "b2e43c1e.1d392",
+        "name": "Home",
+        "topic": "loadshedding/home/next",
+        "qos": "",
+        "retain": "",
+        "broker": "2d5c1fe4.fbc5b",
+        "x": 1690,
+        "y": 420,
+        "wires": []
+    },
+    {
+        "id": "4cda00a7.9af18",
+        "type": "http request",
+        "z": "b2e43c1e.1d392",
+        "name": "Get stage from Eskom API",
+        "method": "GET",
+        "ret": "txt",
+        "paytoqs": "ignore",
+        "url": "http://loadshedding.eskom.co.za/LoadShedding/GetStatus?_=1578576949822",
+        "tls": "",
+        "persist": false,
+        "proxy": "",
+        "authType": "",
+        "x": 320,
+        "y": 100,
+        "wires": [
+            [
+                "ba72eeb8.2359a"
+            ]
+        ]
+    },
+    {
+        "id": "ba72eeb8.2359a",
+        "type": "function",
+        "z": "b2e43c1e.1d392",
+        "name": "Save stage",
+        "func": "var response = msg.payload;\nif (isNaN(response)) return null; // abort\n\nvar stage = parseInt(response, 10) - 1; // 1 = \"no loadshedding\", 2 = stage 1, ...\nif (stage < 0 || stage > 8) return null;\nflow.set('stage', stage);\nmsg.payload = stage;\nreturn msg;",
+        "outputs": 1,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 550,
+        "y": 100,
+        "wires": [
+            [
+                "da475cd4.8deed",
+                "b4c1b58a.cf8278",
+                "f9a7cd0e.acd0a"
+            ]
+        ]
+    },
+    {
+        "id": "9994ced4.5a391",
+        "type": "function",
+        "z": "b2e43c1e.1d392",
+        "name": "Calculate Office schedule",
+        "func": "var loadSheddingSchedule = context.get(\"loadSheddingSchedule\")\n\nlet stage = msg.stage\nlet area = 7\nlet nextSlot = loadSheddingSchedule.getNextTimeSlot(stage, area)\n\nmsg.payload = nextSlot\n\nreturn msg",
+        "outputs": 1,
+        "noerr": 0,
+        "initialize": "// MIT License\n\n// Copyright (c) 2019 Daniel Lindsay\n\n// Permission is hereby granted, free of charge, to any person obtaining a copy\n// of this software and associated documentation files (the \"Software\"), to deal\n// in the Software without restriction, including without limitation the rights\n// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell\n// copies of the Software, and to permit persons to whom the Software is\n// furnished to do so, subject to the following conditions:\n\n// The above copyright notice and this permission notice shall be included in all\n// copies or substantial portions of the Software.\n\n// THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\n// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\n// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\n// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\n// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\n// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\n// SOFTWARE.\n\n// ==============================================================================\n\n\n\n// this all makes a lot ore sense when looking at the actual tables:\n// http://resource.capetown.gov.za/documentcentre/Documents/Procedures%2c%20guidelines%20and%20regulations/Load_Shedding_All_Areas_Schedule_and_Map.pdf\n\n// indecies are 1-based (not 0-based) because we are dealing with day dates, etc so it's just easier imo :)\n// there could be more error handling and validation but you can add that as needed.\n\n// So basically these tables are generated with simple increments throughout numTimeSlots each day...\n\nconst numDayGroups = 16; // columns\nconst numTimeSlots = 12; // rows\nconst numAreaCodes = 16; // what we accumulate to before restarting from 1\n\nconst highestStage = 8;\nconst maxMonthDay = 31;\n\n// but some days, they randomly skip an area for some reason (1-based)\nconst dayAreaExtraIncrements = [5, 9];\n// and the 13th day is only skipped in stages 4 and lower. Ugh this is becoming messy...\nconst dayAreaExtraIncrementsStage4Lower = [13];\n\n// I have questions for who created these loadshedding tables. Anyway...\n\n// Each stage is just a table with a new area starting the chain.\n// To get each stage's full table, you add the previous stages' table data\nconst stageStartingAreas = {\n\t1: 1,\n\t2: 9,\n\t3: 13,\n\t4: 5,\n\t5: 2,\n\t6: 10,\n\t7: 14,\n\t8: 6\n};\n\n// this could be better maybe\nconst timeSlotHours = 2;\nconst timeSlotMinutes = 30;\n\n// then according to the tables (link above),\n// there is this one block where in stage 4, in timeslot 4, area 4 is skipped for some reason\n// it's suspicious but this whole thing has ended up a bit of a hack anyway as they do lots of illogical things\n\n// I want to keep things simple, so this is a Time object for 1 day so we can just deal with relative values\nclass DayTime {\n\tconstructor(hour = 0, minute = 0) {\n\t\tthis.hour = hour;\n\t\tthis.minute = minute;\n\n\t\tif(this.hour >= 24 || this.hour < 0) {\n\t\t\tthis.hour = 0;\n\t\t}\n\n\t\tif(this.minute >= 60 || this.minute < 0) {\n\t\t\tthis.minute = 0;\n\t\t}\n\t}\n}\n\n// quick helper\nfunction addDays(date, days) {\n\tvar result = new Date(date);\n\tresult.setDate(result.getDate() + days);\n\treturn result;\n}\n\n// our main class\n// can also overload these functions in a proper language\nclass LoadSheddingSchedule {\n\t/**\n\t * Get what areas are loadshedding on a particular day and timeslot\n\t * \n\t * @param {number} stage Eskom stage\n\t * @param {number} day day of the month\n\t * @param {number} timeSlot id of timeslot in the table (1-12)\n\t */\n\tgetAreaCodesByTimeSlot(stage, day, timeSlot) {\n\t\tday = this._clipDayToGroup(day);\n\t\tlet areaCodeAcc = this._getAreaCodeAccumulationDayStart(stage, day) + timeSlot;\n\t\tlet areaCode = this._normalizeAreaCode(stage, areaCodeAcc);\n\t\tlet areaCodes = [areaCode];\n\n\t\t// hack: this one is skipped according to the tables for some reason\n\t\tif(stage == 4 && timeSlot == 4 && day == 15) {\n\t\t\tareaCodes = [];\n\t\t}\n\n\t\tif(stage > 1) {\n\t\t\tareaCodes = areaCodes.concat(this.getAreaCodesByTimeSlot(stage - 1, day, timeSlot));\n\t\t}\n\n\t\treturn areaCodes;\n\t}\n\n\t/**\n\t * Get what areas are loadshedding on a particular day and time\n\t * \n\t * @param {number} stage Eskom stage\n\t * @param {number} day day of the month\n\t * @param {DayTime} time time of the day\n\t * @param {boolean} includeoverlap include all the areas when to loadshedding slots are overlapping by getExtraTimeslotMinutes()\n\t * @param {number} previousMonthLastDay this is needed when using overlap in case you are one day 1 at and it searches back to the previous month\n\t */\n\tgetAreaCodesByTimeValue(stage, day, time, includeoverlap = false, previousMonthLastDay = 31) {\n\t\tlet isOddHour = time.hour % timeSlotHours != 0;\n\t\tlet timeSlot = this._getTimeslotFromHour(time.hour);\n\n\t\tlet areaCodes = this.getAreaCodesByTimeSlot(stage, day, timeSlot);\n\n\t\tif(includeoverlap && !isOddHour && time.minute <= timeSlotMinutes) {\n\t\t\tif(timeSlot > 1) {\n\t\t\t\ttimeSlot--;\n\t\t\t} else {\n\t\t\t\ttimeSlot = numTimeSlots;\n\t\t\t\t\n\t\t\t\tif(day > 1) {\n\t\t\t\t\tday--;\n\t\t\t\t} else {\n\t\t\t\t\tday = previousMonthLastDay;\n\t\t\t\t}\n\t\t\t}\n\n\t\t\tareaCodes.push(this.getAreaCodesByTimeSlot(stage, day, timeSlot));\n\t\t}\n\n\t\treturn areaCodes;\n\t}\n\n\t/**\n\t * Get the ids of timeslots that a particular area is being loadshed for a day\n\t * \n\t * @param {number} stage Eskom stage\n\t * @param {number} day day of the month\n\t * @param {number} areaCode the code of the area to check\n\t */\n\tgetTimeSlotsByAreaCode(stage, day, areaCode) {\n\t\tlet timeSlots = [];\n\t\tfor (let i = 0; i < numTimeSlots; i++) {\n\t\t\tlet areas = this.getAreaCodesByTimeSlot(stage, day, i + 1);\n\t\t\tif(areas.indexOf(areaCode) > -1) {\n\t\t\t\ttimeSlots.push(i + 1);\n\t\t\t\tcontinue;\n\t\t\t}\n\t\t}\n\n\t\treturn timeSlots;\n\t}\n\n\t/**\n\t * Get the next timeslot that will be loadshed in a day, starting from a specified hour\n\t * \n\t * @param {number} stage Eskom stage\n\t * @param {number} day day of the month\n\t * @param {number} areaCode the code of the area to check\n\t * @param {number} fromHour bit hacky... what hour to start the search from. Value of -1 starts at beginning of the day (instead of hour 2)\n\t */\n\tgetNextTimeSlotInDay(stage, day, areaCode, fromHour = -1) {\n        let slots = this.getTimeSlotsByAreaCode(stage, day, areaCode);\t\t\n\n        for (let i = 0; i < slots.length; i++) {\n            let slot = slots[i];\n            let slotHour = this.getTimeSlotHour(slot);\n\n            if(fromHour == -1 || slotHour > fromHour) {\n                return slot;\n            }\n        }\n\n        return 0;\n\t}\n\t\n\t/**\n\t * Get the next timeslot and date that will be loadshed. Will search multiple days\n\t * \n\t * @param {number} stage Eskom stage\n\t * @param {number} areaCode the code of the area to check\n\t */\n\tgetNextTimeSlot(stage, areaCode) {\n\t\t// since we're about to go into a loop, searching for known data,\n\t\t// better make sure the search data is valid. We can then be sure\n\t\t// we will find a result\n\t\tlet result = {\n\t\t\tslot: null,\n\t\t\tday: null,\n\t\t\tdate: null\n\t\t};\n\n\t\tif(stage < 1 || stage > highestStage) {\n\t\t\tconsole.log('getNextTimeSlot() stage out of bounds');\n\t\t\treturn result;\n\t\t}\n\n\t\tif(areaCode < 1 || areaCode > numAreaCodes) {\n\t\t\tconsole.log('getNextTimeSlot() areaCode out of bounds');\n\t\t\treturn result;\n\t\t}\n\n\t\tlet d = new Date();\n\t\tlet fromHour = d.getHours();\n\t\tlet fromDay = d.getDate();\n\n\t\tlet slot = null;\n\t\tlet day = fromDay;\n\t\tlet dayAccum = 0;\n\t\twhile(!slot) {\n\t\t\tslot = this.getNextTimeSlotInDay(stage, day, areaCode, day == fromDay ? fromHour : -1);\n\n\t\t\tif(!slot) {\n\t\t\t\tif(day >= maxMonthDay) {\n\t\t\t\t\tday = 1;\n\t\t\t\t} else {\n\t\t\t\t\tday++;\n\t\t\t\t}\n\n\t\t\t\tdayAccum++;\n\t\t\t}\n\t\t}\n\n\t\tlet newDate = new Date();\n\t\tnewDate.setHours(this.getTimeSlotHour(slot));\n\t\tnewDate.setMinutes(0);\n\t\tnewDate.setSeconds(0);\n\t\tnewDate.setMilliseconds(0);\n\t\tnewDate = addDays(newDate, dayAccum);\n\n\t\tresult.slot = slot;\n\t\tresult.day = day;\n\t\tresult.date = newDate;\n\n\t\treturn result;\n\t}\n\n\t/**\n\t * Return if we are currently loadshedding for a particular area and when the endtime is\n\t * \n\t * @param {number} stage Eskom stage\n\t * @param {number} areaCode the code of the area to check\n\t */\n\tisLoadSheddingNow(stage, areaCode) {\n\t\tlet d = new Date();\n\t\tlet hour = d.getHours();\n\t\tlet areaCodes = this.getAreaCodesByTimeValue(stage, d.getDate(), new DayTime(hour, d.getMinutes()));\n\n\t\tlet result = {\n\t\t\tstatus: false,\n\t\t\tendDate: null\n\t\t};\n\n\t\tif(areaCodes.indexOf(areaCode) > -1) {\n\t\t\tresult.status = true;\n\t\t}\n\n\t\tif(result.status) {\n\t\t\t// convert to timeslot and back to hour to get correct hour\n\t\t\tlet slot = this._getTimeslotFromHour(hour);\n\t\t\tlet endDate = new Date();\n\t\t\tendDate.setHours(this.getTimeSlotHour(slot) + timeSlotHours);\n\t\t\tendDate.setMinutes(timeSlotMinutes);\n\t\t\tendDate.setSeconds(0);\n\t\t\tendDate.setMilliseconds(0);\n\t\t\tresult.endDate = endDate;\n\t\t}\n\n\t\treturn result;\n\t}\n\n\t/**\n\t * Get the starting hour of a timeslot\n\t * \n\t * @param {number} slot timeslot id\n\t */\n    getTimeSlotHour(slot) {\n        return (slot - 1) * timeSlotHours;\n\t}\n\t\n\t/**\n\t * Get the extra minutes of an loadshedding timeslot period\n\t */\n\tgetExtraTimeslotMinutes() {\n\t\treturn timeSlotMinutes;\n\t}\n\n\t// private stuff\n\n\t_getTimeslotFromHour(hour) {\n\t\tlet isOddHour = hour % timeSlotHours != 0;\n\n\t\tlet timeSlot = hour;\n\t\tif(isOddHour) {\n\t\t\ttimeSlot--;\n\t\t}\n\n\t\treturn timeSlot / timeSlotHours + 1;\n\t}\n\n\t_clipDayToGroup(day) {\n\t\tif(day > numDayGroups) {\n\t\t\tday -= numDayGroups;\n\t\t}\n\n\t\treturn day;\n\t}\n\n\t_getAreaCodeAccumulationDayStart(stage, day) {\n\t\tif(day <= 1) {\n\t\t\treturn 0;\n\t\t}\n\n\t\tlet dayBefore = day - 1;\n\t\tlet areaCodeAcc = dayBefore * numTimeSlots;\n\t\t\n\t\t// add the extra offsets, including the current day\n\t\tfor (var i = 0; i < dayAreaExtraIncrements.length; i++) {\n\t\t\tif(day >= dayAreaExtraIncrements[i]) {\n\t\t\t\tareaCodeAcc++;\n\t\t\t}\n\t\t}\n\n\t\tif(stage <= 4) {\n\t\t\tfor (var i = 0; i < dayAreaExtraIncrementsStage4Lower.length; i++) {\n\t\t\t\tif(day >= dayAreaExtraIncrementsStage4Lower[i]) {\n\t\t\t\t\tareaCodeAcc++;\n\t\t\t\t}\n\t\t\t}\n\t\t}\n\n\t\treturn areaCodeAcc;\n\t}\n\n\t_normalizeAreaCode(stage, areaCodeAcc) {\n\t\tlet areaCode = areaCodeAcc % numAreaCodes;\n\t\tareaCode += stageStartingAreas[stage] - 1;\n\t\tif(areaCode > numAreaCodes) {\n\t\t\tareaCode -= numAreaCodes;\n\t\t}\n\n\t\treturn areaCode;\n\t}\n}\n\n// ==============================================================================\n\nvar loadSheddingSchedule = new LoadSheddingSchedule();\ncontext.set(\"loadSheddingSchedule\", loadSheddingSchedule)\n\n\n",
+        "finalize": "",
+        "x": 710,
+        "y": 300,
+        "wires": [
+            [
+                "1d1e916e.e7a8bf"
+            ]
+        ],
+        "info": "See \n`https://github.com/Quantiversal/Cape-Town-Loadshedding-Schedule`"
+    },
+    {
+        "id": "da475cd4.8deed",
+        "type": "mqtt out",
+        "z": "b2e43c1e.1d392",
+        "name": "Publish Stage",
+        "topic": "loadshedding/stage",
+        "qos": "",
+        "retain": "true",
+        "broker": "2d5c1fe4.fbc5b",
+        "x": 740,
+        "y": 100,
+        "wires": []
+    },
+    {
+        "id": "b4c1b58a.cf8278",
+        "type": "debug",
+        "z": "b2e43c1e.1d392",
+        "d": true,
+        "name": "Stage",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 710,
+        "y": 40,
+        "wires": []
+    },
+    {
+        "id": "b4c01308.f8205",
+        "type": "http request",
+        "z": "b2e43c1e.1d392",
+        "name": "Get Home schedule from Eskom API",
+        "method": "GET",
+        "ret": "txt",
+        "paytoqs": "ignore",
+        "url": "https://loadshedding.eskom.co.za/LoadShedding/GetScheduleM/64660/{{stage}}/Western%20Cape/810?_=1622575308723",
+        "tls": "4238dd7f.03e3e4",
+        "persist": false,
+        "proxy": "",
+        "authType": "",
+        "x": 750,
+        "y": 380,
+        "wires": [
+            [
+                "3558bb98.862f44",
+                "ea351df0.87bf8"
+            ]
+        ],
+        "info": "TODO: parametarise loadshedding stage (2)"
+    },
+    {
+        "id": "3558bb98.862f44",
+        "type": "html",
+        "z": "b2e43c1e.1d392",
+        "name": "Parse Schedule",
+        "property": "payload",
+        "outproperty": "payload",
+        "tag": ".scheduleDay",
+        "ret": "html",
+        "as": "single",
+        "x": 680,
+        "y": 440,
+        "wires": [
+            [
+                "247a38a8.05fbb8",
+                "f59157e.0c1b4a8"
+            ]
+        ]
+    },
+    {
+        "id": "f26a30db.82c1e",
+        "type": "html",
+        "z": "b2e43c1e.1d392",
+        "name": "Date",
+        "property": "payload",
+        "outproperty": "payload",
+        "tag": ".dayMonth",
+        "ret": "html",
+        "as": "multi",
+        "x": 1050,
+        "y": 420,
+        "wires": [
+            [
+                "e4e8147a.44a1a8"
+            ]
+        ]
+    },
+    {
+        "id": "6ed76334.13167c",
+        "type": "html",
+        "z": "b2e43c1e.1d392",
+        "name": "Slots in day",
+        "property": "payload",
+        "outproperty": "payload",
+        "tag": "div>a",
+        "ret": "html",
+        "as": "single",
+        "x": 1070,
+        "y": 460,
+        "wires": [
+            [
+                "e4e8147a.44a1a8"
+            ]
+        ]
+    },
+    {
+        "id": "e4e8147a.44a1a8",
+        "type": "join",
+        "z": "b2e43c1e.1d392",
+        "name": "",
+        "mode": "custom",
+        "build": "array",
+        "property": "payload",
+        "propertyType": "msg",
+        "key": "topic",
+        "joiner": "\\n",
+        "joinerType": "str",
+        "accumulate": false,
+        "timeout": "",
+        "count": "2",
+        "reduceRight": false,
+        "reduceExp": "",
+        "reduceInit": "",
+        "reduceInitType": "",
+        "reduceFixup": "",
+        "x": 1230,
+        "y": 440,
+        "wires": [
+            [
+                "d56ffc8.9ea5c"
+            ]
+        ]
+    },
+    {
+        "id": "f9a7cd0e.acd0a",
+        "type": "rbe",
+        "z": "b2e43c1e.1d392",
+        "name": "Detect change",
+        "func": "rbei",
+        "gap": "",
+        "start": "",
+        "inout": "out",
+        "property": "payload",
+        "x": 740,
+        "y": 160,
+        "wires": [
+            [
+                "36c33e96.145312"
+            ]
+        ]
+    },
+    {
+        "id": "36c33e96.145312",
+        "type": "mqtt out",
+        "z": "b2e43c1e.1d392",
+        "name": "Publish change",
+        "topic": "loadshedding/stage/updated",
+        "qos": "",
+        "retain": "",
+        "broker": "2d5c1fe4.fbc5b",
+        "x": 950,
+        "y": 160,
+        "wires": []
+    },
+    {
+        "id": "247a38a8.05fbb8",
+        "type": "function",
+        "z": "b2e43c1e.1d392",
+        "name": "Today",
+        "func": "var response = msg.payload;\nmsg.payload = response[0];\nreturn msg;",
+        "outputs": 1,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "x": 890,
+        "y": 440,
+        "wires": [
+            [
+                "f26a30db.82c1e",
+                "6ed76334.13167c"
+            ]
+        ]
+    },
+    {
+        "id": "4867f785.dc3aa8",
+        "type": "switch",
+        "z": "b2e43c1e.1d392",
+        "name": "If Loadshedding",
+        "property": "stage",
+        "propertyType": "flow",
+        "rules": [
+            {
+                "t": "null"
+            },
+            {
+                "t": "eq",
+                "v": "0",
+                "vt": "str"
+            },
+            {
+                "t": "gte",
+                "v": "1",
+                "vt": "str"
+            }
+        ],
+        "checkall": "true",
+        "repair": false,
+        "outputs": 3,
+        "x": 280,
+        "y": 320,
+        "wires": [
+            [
+                "fff37972.1f1378"
+            ],
+            [
+                "fff37972.1f1378"
+            ],
+            [
+                "914fd810.325568"
+            ]
+        ]
+    },
+    {
+        "id": "914fd810.325568",
+        "type": "change",
+        "z": "b2e43c1e.1d392",
+        "name": "Get stage",
+        "rules": [
+            {
+                "t": "set",
+                "p": "stage",
+                "pt": "msg",
+                "to": "stage",
+                "tot": "flow"
+            }
+        ],
+        "action": "",
+        "property": "",
+        "from": "",
+        "to": "",
+        "reg": false,
+        "x": 500,
+        "y": 340,
+        "wires": [
+            [
+                "9994ced4.5a391",
+                "b4c01308.f8205"
+            ]
+        ]
+    },
+    {
+        "id": "9f2e2681.0241f8",
+        "type": "function",
+        "z": "b2e43c1e.1d392",
+        "name": "Next slot",
+        "func": "function formatDate(date) {\n  var d = new Date(date),\n    month = '' + (d.getMonth() + 1),\n    day = '' + d.getDate(),\n    year = new Date().getFullYear()\n\n  if (month.length < 2) month = '0' + month\n  if (day.length < 2) day = '0' + day\n\n  return [year, month, day].join('-')\n}\n\nfunction formatTime(time) {\n    return time.substring(0, 5) + \":00\"\n}\n\nfunction formatIso(date, time) {\n    return date + \"T\" + time + \"+02:00\"\n}\n\n// Make a list of date/times of loadshedding\nlet schedule = []\nfor (let day = 0; day < msg.payload.length; day++) {\n    let date = formatDate(msg.payload[day][0])\n    let slots = msg.payload[day][1]\n    for (let slot = 0; slot < slots.length; slot++) {\n        let time = formatTime(slots[slot])\n        schedule.push(formatIso(date, time))\n    }\n}\n\n//schedule.push(\"2021-03-01T12:00:00+02:00\")  // testing logic\n\nschedule.sort()  // Ascending date/times]\n\n// Ugh this is horrible....\nvar timenow = new Date()\ntimenow = new Date(timenow.setHours(timenow.getHours() + 2)).toISOString()\ntimenow = timenow.replace(\"Z\", \"+02:00\")\n\nlet nextSlot = null\nfor (let day = 0; day < schedule.length; day++) {\n    if (schedule[day] >= timenow) {\n        nextSlot = schedule[day]\n        break\n    }\n}\n\npayload = {\n    \"time\": timenow,\n    \"schedule\": schedule,\n    \"next\": nextSlot\n}\n\nmsg.payload = payload\nreturn msg",
+        "outputs": 1,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "x": 1520,
+        "y": 480,
+        "wires": [
+            [
+                "2008f989.8e1066",
+                "b0a47b81.c066c8"
+            ]
+        ]
+    },
+    {
+        "id": "fff37972.1f1378",
+        "type": "function",
+        "z": "b2e43c1e.1d392",
+        "name": "No loadshedding scheduled",
+        "func": "// Ugh this is horrible....\nvar timenow = new Date()\ntimenow = new Date(timenow.setHours(timenow.getHours() + 2)).toISOString()\ntimenow = timenow.replace(\"Z\", \"+02:00\")\n\npayload = {\n    \"time\": timenow,\n    \"schedule\": [],\n    \"next\": null\n}\n\nmsg.payload = payload\nreturn msg",
+        "outputs": 1,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "x": 860,
+        "y": 240,
+        "wires": [
+            [
+                "2008f989.8e1066",
+                "8a95e159.468a5"
+            ]
+        ]
+    },
+    {
+        "id": "8ac160bf.ab6c7",
+        "type": "inject",
+        "z": "b2e43c1e.1d392",
+        "name": "trigger",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "topic",
+                "vt": "str"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "",
+        "payloadType": "date",
+        "x": 90,
+        "y": 320,
+        "wires": [
+            [
+                "4867f785.dc3aa8"
+            ]
+        ]
+    },
+    {
+        "id": "c712e7fb.54a188",
+        "type": "html",
+        "z": "b2e43c1e.1d392",
+        "name": "Date",
+        "property": "payload",
+        "outproperty": "payload",
+        "tag": ".dayMonth",
+        "ret": "html",
+        "as": "multi",
+        "x": 1050,
+        "y": 520,
+        "wires": [
+            [
+                "76b382e4.1afb8c"
+            ]
+        ]
+    },
+    {
+        "id": "76c61043.c69dd",
+        "type": "html",
+        "z": "b2e43c1e.1d392",
+        "name": "Slots in day",
+        "property": "payload",
+        "outproperty": "payload",
+        "tag": "div>a",
+        "ret": "html",
+        "as": "single",
+        "x": 1070,
+        "y": 560,
+        "wires": [
+            [
+                "76b382e4.1afb8c"
+            ]
+        ]
+    },
+    {
+        "id": "f59157e.0c1b4a8",
+        "type": "function",
+        "z": "b2e43c1e.1d392",
+        "name": "Tomorrow",
+        "func": "var response = msg.payload;\nmsg.payload = response[1];\nreturn msg;",
+        "outputs": 1,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "x": 900,
+        "y": 540,
+        "wires": [
+            [
+                "c712e7fb.54a188",
+                "76c61043.c69dd"
+            ]
+        ]
+    },
+    {
+        "id": "76b382e4.1afb8c",
+        "type": "join",
+        "z": "b2e43c1e.1d392",
+        "name": "",
+        "mode": "custom",
+        "build": "array",
+        "property": "payload",
+        "propertyType": "msg",
+        "key": "topic",
+        "joiner": "\\n",
+        "joinerType": "str",
+        "accumulate": false,
+        "timeout": "",
+        "count": "2",
+        "reduceRight": false,
+        "reduceExp": "",
+        "reduceInit": "",
+        "reduceInitType": "",
+        "reduceFixup": "",
+        "x": 1230,
+        "y": 540,
+        "wires": [
+            [
+                "d56ffc8.9ea5c"
+            ]
+        ]
+    },
+    {
+        "id": "d56ffc8.9ea5c",
+        "type": "join",
+        "z": "b2e43c1e.1d392",
+        "name": "",
+        "mode": "custom",
+        "build": "array",
+        "property": "payload",
+        "propertyType": "msg",
+        "key": "topic",
+        "joiner": "\\n",
+        "joinerType": "str",
+        "accumulate": false,
+        "timeout": "",
+        "count": "2",
+        "reduceRight": false,
+        "reduceExp": "",
+        "reduceInit": "",
+        "reduceInitType": "",
+        "reduceFixup": "",
+        "x": 1370,
+        "y": 480,
+        "wires": [
+            [
+                "9f2e2681.0241f8"
+            ]
+        ]
+    },
+    {
+        "id": "6cbad381.3b61ac",
+        "type": "delay",
+        "z": "b2e43c1e.1d392",
+        "name": "",
+        "pauseType": "delay",
+        "timeout": "10",
+        "timeoutUnits": "seconds",
+        "rate": "1",
+        "nbRateUnits": "1",
+        "rateUnits": "second",
+        "randomFirst": "1",
+        "randomLast": "5",
+        "randomUnits": "seconds",
+        "drop": false,
+        "x": 260,
+        "y": 240,
+        "wires": [
+            [
+                "4867f785.dc3aa8"
+            ]
+        ]
+    },
+    {
+        "id": "1d1e916e.e7a8bf",
+        "type": "function",
+        "z": "b2e43c1e.1d392",
+        "name": "Next slot",
+        "func": "// Ugh this is horrible....\nlet timenow = new Date()\ntimenow = new Date(timenow.setHours(timenow.getHours() + 2)).toISOString()\ntimenow = timenow.replace(\"Z\", \"+02:00\")\n\nnextSlot = new Date(msg.payload.date).toISOString()\nnextSlot = nextSlot.replace(\"Z\", \"+02:00\")\n\npayload = {\n    \"time\": timenow,\n    \"schedule\": [],\n    \"next\": nextSlot\n}\n\nmsg.payload = payload\nmsg.topic = \"loadshedding/office/next\"\nreturn msg",
+        "outputs": 1,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "x": 920,
+        "y": 300,
+        "wires": [
+            [
+                "8a95e159.468a5",
+                "ea351df0.87bf8"
+            ]
+        ]
+    },
+    {
+        "id": "b0a47b81.c066c8",
+        "type": "debug",
+        "z": "b2e43c1e.1d392",
+        "name": "",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 1710,
+        "y": 480,
+        "wires": []
+    },
+    {
+        "id": "8a95e159.468a5",
+        "type": "mqtt out",
+        "z": "b2e43c1e.1d392",
+        "name": "Office",
+        "topic": "loadshedding/office/next",
+        "qos": "",
+        "retain": "",
+        "respTopic": "",
+        "contentType": "",
+        "userProps": "",
+        "correl": "",
+        "expiry": "",
+        "broker": "2d5c1fe4.fbc5b",
+        "x": 1090,
+        "y": 300,
+        "wires": []
+    },
+    {
+        "id": "ea351df0.87bf8",
+        "type": "debug",
+        "z": "b2e43c1e.1d392",
+        "d": true,
+        "name": "",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 1110,
+        "y": 360,
+        "wires": []
+    },
+    {
+        "id": "2d5c1fe4.fbc5b",
+        "type": "mqtt-broker",
+        "name": "MQTT",
+        "broker": "10.0.0.2",
+        "port": "1883",
+        "clientid": "node-red",
+        "usetls": false,
+        "compatmode": false,
+        "keepalive": "60",
+        "cleansession": true,
+        "birthTopic": "",
+        "birthQos": "0",
+        "birthPayload": "",
+        "closeTopic": "",
+        "closeQos": "0",
+        "closePayload": "",
+        "willTopic": "",
+        "willQos": "0",
+        "willPayload": ""
+    },
+    {
+        "id": "4238dd7f.03e3e4",
+        "type": "tls-config",
+        "name": "default",
+        "cert": "",
+        "key": "",
+        "ca": "",
+        "certname": "",
+        "keyname": "",
+        "caname": "",
+        "servername": "",
+        "verifyservercert": true
+    }
+]
