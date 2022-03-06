@@ -123,10 +123,10 @@ entities:
   - entity: sensor.loadshedding_stage
   - type: conditional
     conditions:
-      - entity: sensor.loadshedding_home_next
+      - entity: sensor.next_loadshedding_time
         state_not: None
     row:
-      entity: sensor.loadshedding_home_next
+      entity: sensor.next_loadshedding_time
       name: Next loadshed
       format: time
 title: Power
